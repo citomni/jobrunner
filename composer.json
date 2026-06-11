@@ -1,0 +1,92 @@
+{
+	"name": "citomni/jobrunner",
+	"description": "Small DB-backed job runner for CitOmni: HTTP/UI-started long-running jobs executed by CLI workers with status, steps, logs, heartbeat, and results.",
+	"type": "library",
+	"license": "MIT",
+	"homepage": "https://github.com/citomni/jobrunner",
+	"keywords": [
+		"citomni",
+		"citomni-framework",
+		"citomni-php",
+		"job-runner",
+		"background-jobs",
+		"long-running-jobs",
+		"cli-worker",
+		"http-to-cli",
+		"db-backed",
+		"status-tracking",
+		"workflow-automation",
+		"developer-tools",
+		"php",
+		"php8",
+		"framework",
+		"psr-4",
+		"high-performance",
+		"low-overhead",
+		"deterministic",
+		"green-by-design"
+	],
+	"require": {
+		"php": "^8.2",
+		"ext-json": "*",
+		"citomni/kernel": "^1.0",
+		"citomni/cli": "^1.0",
+		"citomni/infrastructure": "^1.0"
+	},
+	"autoload": {
+		"psr-4": {
+			"CitOmni\\JobRunner\\": "src/"
+		}
+	},
+	"autoload-dev": {
+		"psr-4": {
+			"CitOmni\\JobRunner\\Tests\\": "tests/"
+		}
+	},
+	"require-dev": {
+		"phpunit/phpunit": "^11.0",
+		"phpstan/phpstan": "^1.11"
+	},
+	"suggest": {
+		"citomni/http": "HTTP runtime for UIs that start jobs and poll job status.",
+		"ext-opcache": "Better performance in production.",
+		"ext-apcu": "Speeds up Composer's class loading in production."
+	},
+	"support": {
+		"issues": "https://github.com/citomni/jobrunner/issues",
+		"source": "https://github.com/citomni/jobrunner",
+		"docs": "https://github.com/citomni/docs/blob/main/how-to/jobrunner-usage.md"
+	},
+	"authors": [
+		{
+			"name": "Lars Grove Mortensen",
+			"homepage": "https://www.citomni.com"
+		}
+	],
+	"config": {
+		"sort-packages": true,
+		"optimize-autoloader": true
+	},
+	"archive": {
+		"exclude": [
+			"/.github",
+			"/docs",
+			"/tests",
+			"/dev",
+			"/examples",
+			"/vendor",
+			"/.editorconfig",
+			"/.gitattributes",
+			"/.gitignore",
+			"/phpunit.xml*",
+			"/.idea",
+			"/.vscode",
+			"/Makefile"
+		]
+	},
+	"extra": {
+		"branch-alias": {
+			"dev-main": "1.0.x-dev"
+		}
+	}
+}
