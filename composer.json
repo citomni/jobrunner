@@ -27,7 +27,7 @@
 		"green-by-design"
 	],
 	"require": {
-		"php": "^8.2",
+		"php": "^8.5",
 		"ext-json": "*",
 		"citomni/kernel": "^1.0",
 		"citomni/cli": "^1.0",
