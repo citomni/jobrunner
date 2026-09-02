@@ -19,40 +19,56 @@ use CitOmni\JobRunner\Exception\JobRunnerException;
 use CitOmni\Kernel\Service\BaseService;
 
 /**
- * JobLauncher: Start a detached CLI worker process for one queued job.
+ * JobLauncher: Start fixed internal JobRunner CLI worker processes.
  *
- * This service does one thing only: it submits an OS-aware, detached CLI
- * command for the fixed internal worker entrypoint:
+ * This service owns only OS-aware process creation for JobRunner's fixed worker
+ * entrypoints. It supports the existing detached token/push worker and the
+ * synchronous fresh trusted child used by the persistent trusted supervisor.
  *
+ * Fixed worker entrypoints:
  *   php bin/citomni job:run <job-id> --token=<token>
+ *   php bin/citomni job:run-trusted <job-id> --token=<handoff-token>
  *
- * It does not claim jobs, resolve handlers, build JobContext, touch the
- * database, or run any job workflow. Job lifecycle and outcome are owned by
- * RunJobCommand / RunQueuedJob and reported through the database. This service
- * never blocks the calling (HTTP) request: it submits the background process
- * and returns immediately.
+ * It does not claim jobs, resolve handlers, build JobContext, touch persistence,
+ * decide job outcomes, or run workflow itself. Those responsibilities remain in
+ * Commands, Operations, and JobRepository.
  *
  * Behavior:
- * - Validates method input and fails fast on invalid input (SPL exceptions).
- * - Resolves the configured CLI entrypoint and fails fast on impossible
- *   launch setup (JobRunnerException).
- * - Builds the command from escaped argument parts; never concatenates raw
- *   dynamic values into the command line.
- * - Submits a detached worker on Windows (`start "" /B`) and Unix-like
- *   (`... > /dev/null 2>&1 &`) without waiting for the worker to finish.
+ * - launch() submits the token/push `job:run` process detached from the caller and
+ *   returns immediately. Its boolean result describes only OS submission, never
+ *   the eventual job outcome.
+ * - runTrusted() starts one fresh `job:run-trusted` child synchronously and blocks
+ *   until that child exits. Its integer result is the child process exit code,
+ *   not a JobRunner job status.
+ * - Both paths validate the job id and opaque capability without trimming or
+ *   otherwise modifying the token.
+ * - Both paths resolve the configured CLI entrypoint against App::getAppRoot()
+ *   when necessary and fail fast if the entrypoint cannot be used.
+ * - Detached launch is implemented with the existing OS-specific shell commands:
+ *   `start "" /B` on Windows and a backgrounded command on Unix-like systems.
+ * - Trusted launch uses proc_open() with an argv array, avoiding shell parsing of
+ *   the trusted child command and waiting for that exact fresh PHP process.
  *
  * Notes:
- * - The only command this service may build is the fixed worker command above.
- *   It is not a general command executor.
- * - The worker token is an opaque credential: it is escaped for the shell, but
- *   it is never trimmed, printed, logged, returned, or placed in any exception
- *   message or return value.
- * - Output is intentionally discarded in V1; worker output goes to the database
- *   via JobLogger, not through captured streams.
- * - No SQL. No transport concerns. No external process libraries.
+ * - This is deliberately not a general process runner. Command names and argument
+ *   structure are fixed inside this service.
+ * - Worker tokens and trusted handoff tokens are opaque execution capabilities.
+ *   They are never logged, returned, printed, persisted by this service, or
+ *   included in exception messages.
+ * - A non-zero trusted child exit code is not automatically a launcher failure:
+ *   the child may have correctly persisted a FAILED job or lost its guarded
+ *   ownership claim. The supervisor decides what to do after inspecting the
+ *   persisted job state.
+ * - Worker stdout/stderr are intentionally discarded here. Persistent job output
+ *   belongs in JobLogger, not process pipes.
+ * - The trusted child is synchronous by design so a single `job:work` supervisor
+ *   executes at most one trusted job at a time in V1.
+ * - No SQL, transport handling, handler execution, user switching, scheduler
+ *   integration, or arbitrary shell execution belongs in this service.
  *
  * Typical usage:
  *   $submitted = $this->app->jobLauncher->launch($jobId, $rawWorkerToken);
+ *   $exitCode = $this->app->jobLauncher->runTrusted($jobId, $rawHandoffToken);
  */
 final class JobLauncher extends BaseService {
 
@@ -63,14 +79,14 @@ final class JobLauncher extends BaseService {
 	 * Initialize cheap, immutable launcher configuration.
 	 *
 	 * Behavior:
-	 * - Reads package-owned launcher cfg. The `jobrunner` node is guaranteed by
-	 *   Registry::CFG_COMMON, so `??` on the leaf is the blessed read pattern.
-	 * - Validates the static config once and fails fast on objectively invalid
-	 *   (empty) values.
+	 * - Reads package-owned `jobrunner.php_binary` and
+	 *   `jobrunner.cli_entrypoint` defaults/overrides.
+	 * - Validates both values once and fails fast when either is empty.
 	 *
 	 * Notes:
-	 * - No I/O happens here. Entrypoint resolution and existence checks are
-	 *   deferred to launch().
+	 * - No filesystem or process I/O happens during service initialization.
+	 *   Entrypoint resolution and existence checks are deferred until a worker is
+	 *   actually launched.
 	 *
 	 * @return void
 	 * @throws \CitOmni\JobRunner\Exception\JobRunnerException When launcher cfg is objectively invalid.
@@ -107,51 +123,110 @@ final class JobLauncher extends BaseService {
 	// ----------------------------------------------------------------
 
 	/**
-	 * Submit a detached CLI worker for one queued job.
+	 * Submit a detached token/push worker for one queued job.
 	 *
-	 * Builds and submits the fixed worker command for the given job id and raw
-	 * worker token, then returns immediately. The boolean return reflects only
-	 * whether the detached process could be submitted to the OS, not whether the
-	 * job will succeed. Job outcome is reported through the database by
-	 * RunJobCommand / RunQueuedJob.
+	 * Builds and submits the fixed `job:run` worker command for the given job id
+	 * and raw worker token, then returns without waiting for job completion.
 	 *
 	 * Behavior:
 	 * - Fails fast on invalid method input.
-	 * - Fails fast on impossible launch setup (entrypoint cannot be resolved or
-	 *   does not exist).
-	 * - Submits an OS-aware detached process and discards its output.
+	 * - Resolves the configured CLI entrypoint and fails fast when launch setup is
+	 *   impossible.
+	 * - Uses the existing OS-specific detached launch path and discards process
+	 *   stdout/stderr.
 	 *
 	 * Notes:
-	 * - The token is not trimmed and is treated as an opaque credential.
-	 * - The token is never logged, printed, returned, or included in exceptions.
+	 * - The boolean return reports process submission only. The child still has to
+	 *   win the token-mode queued -> running claim and execute the handler.
+	 * - The worker token is not trimmed and is never logged, printed, returned, or
+	 *   included in an exception message.
 	 *
-	 * @param int    $jobId       Numeric id of the queued job. Must be >= 1.
-	 * @param string $workerToken Raw worker token issued at job creation. Must be non-empty.
-	 * @return bool True if the detached launch command was submitted; false if the OS could not submit it.
+	 * @param int    $jobId       Numeric id of the queued TOKEN-mode job. Must be >= 1.
+	 * @param string $workerToken Raw worker token issued at enqueue. Must be non-empty.
+	 * @return bool True when the detached launch command was submitted; false when the OS could not submit it.
 	 * @throws \InvalidArgumentException When $jobId < 1 or $workerToken is empty.
 	 * @throws \CitOmni\JobRunner\Exception\JobRunnerException When the CLI entrypoint cannot be resolved or does not exist.
 	 */
 	public function launch(int $jobId, string $workerToken): bool {
+		$this->validateWorkerInput($jobId, $workerToken, 'Worker token');
 
-		// -- 1. Validate method input (ordinary invalid input -> SPL) -----
-		if ($jobId < 1) {
-			throw new \InvalidArgumentException('Job id must be an integer >= 1.');
-		}
-
-		// Do not trim: the worker token is an opaque credential.
-		if ($workerToken === '') {
-			throw new \InvalidArgumentException('Worker token cannot be empty.');
-		}
-
-		// -- 2. Resolve the CLI entrypoint (fail fast on impossible setup) -
+		// Resolve immediately before launch so a stale/missing entrypoint fails
+		// loudly at the process boundary rather than during service construction.
 		$entrypoint = $this->resolveEntrypoint();
 
-		// -- 3. Submit the OS-aware detached worker process ----------------
 		if (\PHP_OS_FAMILY === 'Windows') {
 			return $this->launchWindows($entrypoint, $jobId, $workerToken);
 		}
 
 		return $this->launchUnix($entrypoint, $jobId, $workerToken);
+	}
+
+	/**
+	 * Run one trusted child worker synchronously and return its exit code.
+	 *
+	 * Starts the fixed `job:run-trusted` command in a fresh PHP process and blocks
+	 * until that child exits. The trusted supervisor prepares the ephemeral handoff
+	 * hash before calling this method; the child itself remains responsible for the
+	 * guarded trusted queued -> running claim.
+	 *
+	 * Behavior:
+	 * - Validates the job id and opaque handoff token without trimming the token.
+	 * - Resolves the same configured PHP binary and CLI entrypoint used by the
+	 *   detached token launcher.
+	 * - Uses proc_open() with an argv array so the trusted child command does not
+	 *   pass through shell command parsing.
+	 * - Connects stdin/stdout/stderr to the platform null device because persistent
+	 *   execution output belongs in JobLogger.
+	 * - Waits for the fresh child to exit and returns its process exit code unchanged.
+	 *
+	 * Notes:
+	 * - A non-zero exit code may be a normal, fully persisted JobRunner outcome
+	 *   (for example a handler failure) or a failed ownership claim. It is not
+	 *   automatically equivalent to process-launch failure.
+	 * - Failure to create the child process is exceptional and raises
+	 *   JobRunnerException with reason code `trusted_worker_launch_failed`.
+	 * - This method does not inspect or mutate job state and does not retry.
+	 *
+	 * @param int    $jobId        Trusted queued job id. Must be >= 1.
+	 * @param string $handoffToken Raw ephemeral handoff capability. Must be non-empty.
+	 * @return int Exact child process exit code returned by proc_close().
+	 * @throws \InvalidArgumentException When $jobId < 1 or $handoffToken is empty.
+	 * @throws \CitOmni\JobRunner\Exception\JobRunnerException When launch setup is invalid or the child process cannot be submitted.
+	 */
+	public function runTrusted(int $jobId, string $handoffToken): int {
+		$this->validateWorkerInput($jobId, $handoffToken, 'Handoff token');
+
+		// Trusted children use the same configured executable/entrypoint as the
+		// push path, but are started synchronously without a shell command string.
+		$entrypoint = $this->resolveEntrypoint();
+		$nullDevice = \PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null';
+
+		$command = [
+			$this->phpBinary,
+			$entrypoint,
+			'job:run-trusted',
+			(string)$jobId,
+			'--token=' . $handoffToken,
+		];
+		$descriptors = [
+			0 => ['file', $nullDevice, 'r'],
+			1 => ['file', $nullDevice, 'w'],
+			2 => ['file', $nullDevice, 'w'],
+		];
+		$pipes = [];
+
+		$process = \proc_open($command, $descriptors, $pipes);
+
+		if (!\is_resource($process)) {
+			throw new JobRunnerException(
+				'Trusted job worker process could not be launched.',
+				0,
+				null,
+				'trusted_worker_launch_failed'
+			);
+		}
+
+		return \proc_close($process);
 	}
 
 
@@ -160,11 +235,34 @@ final class JobLauncher extends BaseService {
 	// ----------------------------------------------------------------
 
 	/**
+	 * Validate common worker launch input.
+	 *
+	 * Tokens are opaque capabilities and therefore are deliberately not trimmed or
+	 * normalized. Only the objectively invalid empty value is rejected.
+	 *
+	 * @param int    $jobId      Job id.
+	 * @param string $token      Opaque worker capability.
+	 * @param string $tokenLabel Non-secret label used only in validation text.
+	 * @return void
+	 * @throws \InvalidArgumentException When the job id is invalid or the token is empty.
+	 */
+	private function validateWorkerInput(int $jobId, string $token, string $tokenLabel): void {
+		if ($jobId < 1) {
+			throw new \InvalidArgumentException('Job id must be an integer >= 1.');
+		}
+
+		if ($token === '') {
+			throw new \InvalidArgumentException($tokenLabel . ' cannot be empty.');
+		}
+	}
+
+	/**
 	 * Resolve the configured CLI entrypoint to an existing file path.
 	 *
 	 * Relative entrypoints are resolved against the application root
 	 * (CITOMNI_APP_PATH via App::getAppRoot()). Absolute entrypoints are used
-	 * as-is. A non-existent entrypoint is treated as an impossible launch setup.
+	 * unchanged. A missing application root or non-existent entrypoint is treated
+	 * as impossible launch setup and fails fast before process creation.
 	 *
 	 * @return string Absolute, existing path to the CitOmni CLI entrypoint.
 	 * @throws \CitOmni\JobRunner\Exception\JobRunnerException When the app root is unavailable or the entrypoint does not exist.
@@ -200,16 +298,16 @@ final class JobLauncher extends BaseService {
 	}
 
 	/**
-	 * Submit a detached worker on Unix-like systems.
+	 * Submit the detached token worker on Unix-like systems.
 	 *
-	 * Backgrounds the worker with stdout/stderr redirected to /dev/null and
-	 * returns without waiting. The foreground shell that backgrounds the worker
-	 * returns immediately, so exec() does not block on the worker itself.
+	 * Backgrounds the fixed `job:run` worker with stdout/stderr redirected to
+	 * /dev/null. The foreground shell returns after submitting the background
+	 * process, so this method does not wait for the job worker to finish.
 	 *
 	 * @param string $entrypoint  Absolute path to the CLI entrypoint.
 	 * @param int    $jobId       Validated job id.
-	 * @param string $workerToken Raw worker token (escaped for the shell, never logged).
-	 * @return bool True if the background command was submitted; false otherwise.
+	 * @param string $workerToken Raw worker token; escaped for the shell and never logged.
+	 * @return bool True when the background command was submitted successfully.
 	 */
 	private function launchUnix(string $entrypoint, int $jobId, string $workerToken): bool {
 		$command =
@@ -223,8 +321,8 @@ final class JobLauncher extends BaseService {
 		$output   = [];
 		$exitCode = 0;
 
-		// exec() returns false only when the command could not be executed.
-		// With the trailing '&', the foreground shell returns immediately.
+		// With the trailing '&', the foreground shell exits after submitting the
+		// worker; this does not wait for the actual job process to complete.
 		$lastLine = \exec($command, $output, $exitCode);
 
 		if ($lastLine === false) {
@@ -235,21 +333,21 @@ final class JobLauncher extends BaseService {
 	}
 
 	/**
-	 * Submit a detached worker on Windows.
+	 * Submit the detached token worker on Windows.
 	 *
-	 * Uses `start "" /B` so the worker runs without a new window and without
-	 * blocking the caller. The first quoted token after `start` is the (empty)
-	 * window title; the actual program follows.
+	 * Uses `start "" /B` so the fixed `job:run` worker is submitted without a new
+	 * window and without blocking the caller. The first quoted argument after
+	 * `start` is the required empty window title; the PHP executable follows.
 	 *
 	 * Notes:
-	 * - popen() runs the command through `cmd.exe /c`. Because the command
-	 *   begins with `start` (not a quote), cmd's quote-stripping heuristic is
-	 *   not triggered, so the escaped argument quotes are preserved.
+	 * - popen() executes through cmd.exe. Because the command begins with `start`
+	 *   rather than a quoted executable path, cmd's leading-quote heuristic does
+	 *   not consume the escaped PHP/entrypoint argument quotes.
 	 *
 	 * @param string $entrypoint  Absolute path to the CLI entrypoint.
 	 * @param int    $jobId       Validated job id.
-	 * @param string $workerToken Raw worker token (escaped for the shell, never logged).
-	 * @return bool True if the detached command was submitted; false otherwise.
+	 * @param string $workerToken Raw worker token; escaped for the shell and never logged.
+	 * @return bool True when the detached command was submitted successfully.
 	 */
 	private function launchWindows(string $entrypoint, int $jobId, string $workerToken): bool {
 		$command =
@@ -275,11 +373,11 @@ final class JobLauncher extends BaseService {
 	/**
 	 * Determine whether a path is absolute on the current platform.
 	 *
-	 * Recognizes Unix roots ("/..."), Windows UNC / rooted paths ("\\..."),
-	 * and Windows drive paths ("C:\..." or "C:/...").
+	 * Recognizes Unix roots (`/...`), Windows rooted/UNC-style paths (`\\...`),
+	 * and Windows drive paths (`C:\\...` or `C:/...`).
 	 *
 	 * @param string $path Path to inspect.
-	 * @return bool True if the path is absolute.
+	 * @return bool True when the path is absolute.
 	 */
 	private function isAbsolutePath(string $path): bool {
 		if ($path === '') {

@@ -76,6 +76,7 @@ final class Registry {
 			'php_binary'     => 'php',
 			'cli_entrypoint' => 'bin/citomni',
 			'log_chunk_max_bytes' => 16384,
+			'trusted_worker_idle_sleep_seconds' => 3,
 		],
 	
 	];
@@ -146,6 +147,10 @@ final class Registry {
 		'job:run-trusted' => [
 			'command'     => \CitOmni\JobRunner\Command\RunTrustedJobCommand::class,
 			'description' => 'Run one prepared trusted CitOmni JobRunner job.',
+		],
+		'job:work' => [
+			'command'     => \CitOmni\JobRunner\Command\WorkJobsCommand::class,
+			'description' => 'Work queued trusted CitOmni JobRunner jobs.',
 		],
 	];
 
