@@ -143,6 +143,10 @@ final class Registry {
 			'command'     => \CitOmni\JobRunner\Command\RunJobCommand::class,
 			'description' => 'Run one queued CitOmni JobRunner job.',
 		],
+		'job:run-trusted' => [
+			'command'     => \CitOmni\JobRunner\Command\RunTrustedJobCommand::class,
+			'description' => 'Run one prepared trusted CitOmni JobRunner job.',
+		],
 	];
 
 }
