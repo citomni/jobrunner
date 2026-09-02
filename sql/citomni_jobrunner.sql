@@ -28,6 +28,7 @@ CREATE TABLE `jobrun_jobs` (
   `job_uuid` char(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   `job_type` varchar(128) NOT NULL,
   `status` varchar(32) NOT NULL,
+  `claim_mode` varchar(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   `lock_key` varchar(191) DEFAULT NULL,
   `title` varchar(255) DEFAULT NULL,
   `payload_json` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL CHECK (json_valid(`payload_json`)),
@@ -39,7 +40,7 @@ CREATE TABLE `jobrun_jobs` (
   `current_step_label` varchar(255) DEFAULT NULL,
   `step_index` smallint(5) unsigned DEFAULT NULL,
   `step_total` smallint(5) unsigned DEFAULT NULL,
-  `worker_token_hash` char(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `worker_token_hash` char(64) CHARACTER SET ascii COLLATE ascii_bin DEFAULT NULL,
   `attempts` int(10) unsigned NOT NULL DEFAULT 0,
   `created_at` datetime(6) NOT NULL,
   `queued_at` datetime(6) DEFAULT NULL,
@@ -54,7 +55,10 @@ CREATE TABLE `jobrun_jobs` (
   KEY `ix_jobrun_jobs_status_created` (`status`,`created_at`),
   KEY `ix_jobrun_jobs_type_status` (`job_type`,`status`),
   KEY `ix_jobrun_jobs_lock_status` (`lock_key`,`status`),
-  KEY `ix_jobrun_jobs_status_heartbeat` (`status`,`heartbeat_at`)
+  KEY `ix_jobrun_jobs_status_heartbeat` (`status`,`heartbeat_at`),
+  KEY `ix_jobrun_jobs_claim_status_created` (`claim_mode`,`status`,`created_at`,`id`),
+  CONSTRAINT `chk_jobrun_jobs_claim_mode` CHECK (`claim_mode` in ('token','trusted')),
+  CONSTRAINT `chk_jobrun_jobs_token_hash` CHECK (`claim_mode` <> 'token' or `worker_token_hash` is not null)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
@@ -90,4 +94,4 @@ CREATE TABLE `jobrun_logs` (
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*M!100616 SET NOTE_VERBOSITY=@OLD_NOTE_VERBOSITY */;
 
--- Dump completed on 2026-08-30 14:40:27
+-- Dump completed on 2026-09-02 13:21:53

@@ -14,6 +14,7 @@ declare(strict_types=1);
  */
 namespace CitOmni\JobRunner\Repository;
 
+use CitOmni\JobRunner\Enum\ClaimMode;
 use CitOmni\JobRunner\Enum\JobStatus;
 use CitOmni\Kernel\Repository\BaseRepository;
 
@@ -30,8 +31,10 @@ use CitOmni\Kernel\Repository\BaseRepository;
  * - Table names are resolved once from cfg.jobrunner.tables and cached in init().
  * - State transitions are expressed as guarded, single-row writes; callers read
  *   the boolean return to learn whether the guarded transition actually applied.
- * - The atomic claim is a single conditional UPDATE keyed on status='queued' and
- *   the worker token hash; it is the only safe way to take ownership of a job.
+ * - Worker ownership uses guarded queued -> running transitions keyed on the
+ *   persisted claim mode and worker token hash. Token workers receive their hash
+ *   at enqueue; trusted child workers receive an ephemeral handoff hash while the
+ *   row remains queued and claim it immediately before execution.
  * - JSON columns (payload/result/context) are returned as raw strings. Decoding
  *   and shape decisions belong to the calling Operation.
  *
@@ -54,7 +57,7 @@ final class JobRepository extends BaseRepository {
 
 	/** Job columns returned by the read methods (worker_token_hash + generated column deliberately omitted). */
 	private const JOB_COLUMNS =
-		'id, job_uuid, job_type, status, lock_key, title, '
+		'id, job_uuid, job_type, status, claim_mode, lock_key, title, '
 		. 'payload_json, result_json, '
 		. 'error_class, error_reason_code, error_message, '
 		. 'current_step_key, current_step_label, step_index, step_total, '
@@ -108,8 +111,11 @@ final class JobRepository extends BaseRepository {
 	 *   active_lock_key index and surfaces as a DbQueryException, which is allowed
 	 *   to bubble. Callers that want a friendly path should pre-check with
 	 *   findActiveByLockKey().
+	 * - claim_mode is an explicit persisted ownership discriminator. Token jobs
+	 *   carry their worker hash from enqueue; trusted jobs are created with a null
+	 *   hash and receive an ephemeral handoff hash later while still queued.
 	 *
-	 * @param array{job_uuid:string,job_type:string,worker_token_hash:string,lock_key:?string,title:?string,payload_json:?string,created_at:string,queued_at:string,updated_at:string} $data Row payload.
+	 * @param array{job_uuid:string,job_type:string,claim_mode:string,worker_token_hash:?string,lock_key:?string,title:?string,payload_json:?string,created_at:string,queued_at:string,updated_at:string} $data Row payload.
 	 * @return int New job id.
 	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException On insert/constraint failure.
 	 */
@@ -118,6 +124,7 @@ final class JobRepository extends BaseRepository {
 			'job_uuid'          => $data['job_uuid'],
 			'job_type'          => $data['job_type'],
 			'status'            => JobStatus::QUEUED->value,
+			'claim_mode'        => $data['claim_mode'],
 			'lock_key'          => $data['lock_key'] ?? null,
 			'title'             => $data['title'] ?? null,
 			'payload_json'      => $data['payload_json'] ?? null,
@@ -142,7 +149,8 @@ final class JobRepository extends BaseRepository {
 	 * Behavior:
 	 * - Single conditional UPDATE: queued -> running, sets started_at/heartbeat_at,
 	 *   increments attempts, bumps updated_at.
-	 * - Guarded on id, status='queued', and worker_token_hash.
+	 * - Guarded on id, status='queued', claim_mode='token', and
+	 *   worker_token_hash. Trusted jobs are invisible to this claim path.
 	 *
 	 * @param int    $jobId           Job id.
 	 * @param string $workerTokenHash sha256 hex of the worker token.
@@ -161,7 +169,7 @@ final class JobRepository extends BaseRepository {
 		$affected = $this->app->db->execute(
 			'UPDATE ' . $this->tableJobs . '
 			 SET status = ?, started_at = ?, heartbeat_at = ?, attempts = attempts + 1, updated_at = ?
-			 WHERE id = ? AND status = ? AND worker_token_hash = ?',
+			 WHERE id = ? AND status = ? AND claim_mode = ? AND worker_token_hash = ?',
 			[
 				JobStatus::RUNNING->value,
 				$now,
@@ -169,7 +177,130 @@ final class JobRepository extends BaseRepository {
 				$now,
 				$jobId,
 				JobStatus::QUEUED->value,
+				ClaimMode::TOKEN->value,
 				$workerTokenHash,
+			]
+		);
+
+		return $affected === 1;
+	}
+
+
+	// ----------------------------------------------------------------
+	// Trusted (pull) dispatch and claim
+	// ----------------------------------------------------------------
+
+	/**
+	 * Find the id of the oldest queued trusted job, if any.
+	 *
+	 * Deterministic queue order uses created_at first and id as the tie-breaker
+	 * when multiple rows share the same microsecond timestamp.
+	 *
+	 * Behavior:
+	 * - Considers only queued trusted-mode jobs. Token-mode jobs are invisible.
+	 * - A queued trusted row may already carry a stale handoff hash after a
+	 *   supervisor crash. It remains eligible so a later dispatch can replace the
+	 *   hash and fence out any child holding the old token.
+	 *
+	 * @return int|null Oldest queued trusted job id, or null when none exists.
+	 */
+	public function findNextTrustedQueuedId(): ?int {
+		$value = $this->app->db->fetchValue(
+			'SELECT id
+			 FROM ' . $this->tableJobs . '
+			 WHERE status = ? AND claim_mode = ?
+			 ORDER BY created_at ASC, id ASC
+			 LIMIT 1',
+			[JobStatus::QUEUED->value, ClaimMode::TRUSTED->value]
+		);
+
+		return $value === null ? null : (int)$value;
+	}
+
+	/**
+	 * Prepare one queued trusted job for handoff to a fresh child worker.
+	 *
+	 * This method deliberately does NOT claim or start the job. It only stores the
+	 * hash of the ephemeral handoff token while the row remains queued. The child
+	 * process must later win claimTrustedQueued() before it may execute the handler.
+	 *
+	 * Behavior:
+	 * - Guarded on id, status='queued', and claim_mode='trusted'.
+	 * - Replaces any existing trusted handoff hash. This makes redispatch after a
+	 *   supervisor crash safe: the newest hash fences out a child holding an older
+	 *   token before either can transition the row to running.
+	 * - Bumps updated_at only. started_at, heartbeat_at, and attempts keep their
+	 *   execution semantics and are changed only by the child claim.
+	 *
+	 * @param int    $jobId            Trusted queued job id.
+	 * @param string $handoffTokenHash SHA-256 hex of the ephemeral handoff token.
+	 * @param string $now              MySQL DATETIME(6) literal.
+	 * @return bool True when the handoff hash was stored on an eligible row.
+	 * @throws \InvalidArgumentException When job id or handoff token hash is invalid.
+	 */
+	public function prepareTrustedDispatch(int $jobId, string $handoffTokenHash, string $now): bool {
+		if ($jobId < 1) {
+			throw new \InvalidArgumentException('Job id must be >= 1.');
+		}
+		if ($handoffTokenHash === '') {
+			throw new \InvalidArgumentException('Handoff token hash cannot be empty.');
+		}
+
+		$affected = $this->app->db->update(
+			$this->tableJobs,
+			[
+				'worker_token_hash' => $handoffTokenHash,
+				'updated_at'        => $now,
+			],
+			'id = ? AND status = ? AND claim_mode = ?',
+			[$jobId, JobStatus::QUEUED->value, ClaimMode::TRUSTED->value]
+		);
+
+		return $affected === 1;
+	}
+
+	/**
+	 * Atomically claim a queued trusted job for its prepared child worker.
+	 *
+	 * This is the trusted ownership gate. The fresh child hashes the raw handoff
+	 * token it received from the supervisor and may execute the job only if this
+	 * guarded queued -> running transition succeeds.
+	 *
+	 * Behavior:
+	 * - Single conditional UPDATE: queued -> running, sets started_at/heartbeat_at,
+	 *   increments attempts, and bumps updated_at.
+	 * - Guarded on id, status='queued', claim_mode='trusted', and the prepared
+	 *   handoff hash. Cancellation competes with this transition on status='queued'.
+	 * - A second child with the same or an older token cannot claim a job after the
+	 *   first child has moved it out of queued or a newer dispatch replaced the hash.
+	 *
+	 * @param int    $jobId            Job id.
+	 * @param string $handoffTokenHash SHA-256 hex of the handoff token.
+	 * @param string $now              MySQL DATETIME(6) literal.
+	 * @return bool True when this child won the claim.
+	 * @throws \InvalidArgumentException When job id or handoff token hash is invalid.
+	 */
+	public function claimTrustedQueued(int $jobId, string $handoffTokenHash, string $now): bool {
+		if ($jobId < 1) {
+			throw new \InvalidArgumentException('Job id must be >= 1.');
+		}
+		if ($handoffTokenHash === '') {
+			throw new \InvalidArgumentException('Handoff token hash cannot be empty.');
+		}
+
+		$affected = $this->app->db->execute(
+			'UPDATE ' . $this->tableJobs . '
+			 SET status = ?, started_at = ?, heartbeat_at = ?, attempts = attempts + 1, updated_at = ?
+			 WHERE id = ? AND status = ? AND claim_mode = ? AND worker_token_hash = ?',
+			[
+				JobStatus::RUNNING->value,
+				$now,
+				$now,
+				$now,
+				$jobId,
+				JobStatus::QUEUED->value,
+				ClaimMode::TRUSTED->value,
+				$handoffTokenHash,
 			]
 		);
 
@@ -651,6 +782,7 @@ final class JobRepository extends BaseRepository {
 			'job_uuid'           => (string)$row['job_uuid'],
 			'job_type'           => (string)$row['job_type'],
 			'status'             => (string)$row['status'],
+			'claim_mode'         => (string)$row['claim_mode'],
 			'lock_key'           => $row['lock_key'] !== null ? (string)$row['lock_key'] : null,
 			'title'              => $row['title'] !== null ? (string)$row['title'] : null,
 			'payload_json'       => $row['payload_json'] !== null ? (string)$row['payload_json'] : null,

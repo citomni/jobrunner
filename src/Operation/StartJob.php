@@ -16,6 +16,7 @@ declare(strict_types=1);
 namespace CitOmni\JobRunner\Operation;
 
 use CitOmni\Infrastructure\Exception\DbQueryException;
+use CitOmni\JobRunner\Enum\ClaimMode;
 use CitOmni\JobRunner\Exception\JobRunnerException;
 use CitOmni\JobRunner\Repository\JobRepository;
 use CitOmni\JobRunner\Support\Clock;
@@ -41,8 +42,10 @@ use CitOmni\Kernel\Operation\BaseOperation;
  *   active_lock_key remains the authoritative duplicate guard (see Notes).
  * - Encodes the payload, generates a job UUID and a single-use worker token,
  *   and stores only the SHA-256 hash of that token.
- * - Persists the queued job through JobRepository::createQueuedJob() and then
- *   launches the detached worker through the jobLauncher service.
+ * - Persists the queued job in token claim mode through
+ *   JobRepository::createQueuedJob() and then launches the detached worker
+ *   through the jobLauncher service. Trusted/pull jobs use a separate enqueue
+ *   path and are not launched by this Operation.
  * - If launch submission returns false, transitions the freshly created job to
  *   failed and returns RESULT_LAUNCH_FAILED. If the launcher instead throws a
  *   JobRunnerException, the row is transitioned to failed and the original
@@ -149,6 +152,7 @@ final class StartJob extends BaseOperation {
 			$jobId = $repo->createQueuedJob([
 				'job_uuid'          => $jobUuid,
 				'job_type'          => $jobType,
+				'claim_mode'        => ClaimMode::TOKEN->value,
 				'lock_key'          => $lockKey,
 				'title'             => $title,
 				'payload_json'      => $payloadJson,
