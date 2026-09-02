@@ -2,24 +2,49 @@
 
 DB-backed long-running job execution for CitOmni.
 
-`citomni/jobrunner` is a small CitOmni provider package for explicit long-running jobs that are started from HTTP/UI, persisted in the database, executed by a separate CLI worker, and observed through status, progress, logs, heartbeat, errors, and result data.
+`citomni/jobrunner` is a small provider package for explicit long-running jobs with durable state, registered handlers, structured logs, progress, heartbeat, cancellation, and terminal result/error persistence.
 
-The package is deliberately scoped. It is not a generic queue system, not a daemon, not a scheduler, and not a web-based shell for arbitrary commands. Applications start registered and validated job types; the actual workflow lives in PHP job handlers.
+JobRunner supports two execution ownership models:
 
-Typical use cases include DevKit workflows, imports, exports, deploy steps, rebuilds, report generation, and other explicit administration or developer tasks that are too slow, risky, or verbose to run inside a browser request.
+```text
+TOKEN / PUSH
+StartJob
+  -> enqueue token-mode job
+  -> launch fresh detached job:run child
+  -> child claims queued job with worker token
+  -> execute registered handler
+  -> persist terminal state
+
+TRUSTED / PULL
+EnqueueTrustedJob
+  -> enqueue trusted-mode job
+  -> persistent job:work supervisor discovers it
+  -> prepare ephemeral handoff capability
+  -> launch fresh job:run-trusted child
+  -> child claims queued job with handoff capability
+  -> execute registered handler
+  -> persist terminal state
+```
+
+Both modes execute the actual application handler in a fresh PHP process.
+
+The package is deliberately scoped. It is not a generic message queue, scheduler, retry framework, distributed worker farm, arbitrary command runner, or general daemon framework.
 
 ---
 
 ## Highlights
 
-- Runs long application-defined jobs outside the HTTP request lifecycle.
-- Starts jobs from HTTP, CLI, or other app code through `StartJob`.
-- Executes handlers through the CitOmni CLI worker command.
-- Exposes job status, progress, logs, results, and errors through `GetJobStatus`.
+- Runs application-defined long jobs outside request handling.
+- Supports token/push execution through `StartJob`.
+- Supports trusted/pull execution through `EnqueueTrustedJob` and `job:work`.
+- Executes every actual job handler in a fresh PHP process.
+- Uses atomic, mode-specific worker claims.
+- Preserves opaque capability-based worker ownership in both execution modes.
+- Exposes status, progress, logs, result, and errors through `GetJobStatus`.
 - Supports cooperative cancellation through `CancelJob`.
-- Persists jobs and logs in MySQL using explicit repository-owned SQL.
-- Supports active-job locks to prevent duplicate jobs where needed.
-- Uses CitOmni's provider model; no custom discovery or framework magic. The rabbit stays in the hat.
+- Supports active lock keys to prevent duplicate active work.
+- Persists jobs and logs through repository-owned SQL.
+- Uses CitOmni provider registration and explicit configuration.
 
 ---
 
@@ -27,20 +52,23 @@ Typical use cases include DevKit workflows, imports, exports, deploy steps, rebu
 
 Start here:
 
-* [JobRunner usage guide](https://github.com/citomni/docs/blob/main/how-to/jobrunner-usage.md)
-* [End-to-end smoke test](https://github.com/citomni/docs/blob/main/how-to/jobrunner-end-to-end-smoke-test.md)
+- [JobRunner usage guide](https://github.com/citomni/docs/blob/main/how-to/jobrunner-usage.md)
+- [JobRunner execution ownership architecture](https://github.com/citomni/docs/blob/main/concepts/JobRunner-execution-ownership.md)
+- [End-to-end smoke test](https://github.com/citomni/docs/blob/main/how-to/jobrunner-end-to-end-smoke-test.md)
 
-Long-form documentation lives in the separate [`citomni/docs`](https://github.com/citomni/docs) repository. This package README stays focused on installation, runtime shape, and the public surface. It is a README, not a furniture warehouse.
+Long-form documentation lives in the separate [`citomni/docs`](https://github.com/citomni/docs) repository.
+
+This README stays focused on package purpose, installation, runtime shape, and the main public surface.
 
 ---
 
 ## Requirements
 
-* PHP 8.2+
-* Composer
-* CitOmni application using `citomni/kernel`
-* CitOmni CLI mode for worker execution
-* A database connection supplied through `citomni/infrastructure`
+- PHP 8.5+
+- Composer
+- A CitOmni application using `citomni/kernel`
+- CitOmni CLI mode for worker execution
+- A database connection supplied through `citomni/infrastructure`
 
 `citomni/jobrunner` must be installed as a Composer dependency. Do not copy package source into an application.
 
@@ -52,170 +80,649 @@ Long-form documentation lives in the separate [`citomni/docs`](https://github.co
 composer require citomni/jobrunner
 ```
 
-Install the database schema from the package:
+Install the database schema from:
 
 ```text
 sql/citomni_jobrunner.sql
 ```
 
-The schema creates the JobRunner job and log tables used by the repository layer.
+The schema creates:
+
+```text
+jobrun_jobs
+jobrun_logs
+```
 
 ---
 
 ## What this package provides
 
-### Job lifecycle
+### Durable lifecycle
 
-* Job creation through `StartJob`
-* DB-backed queued/running/cancel_requested/succeeded/failed/cancelled status tracking
-* Atomic worker claiming
-* Worker token validation
-* Heartbeat timestamps
-* Step key, label, index, and total tracking
-* Final result persistence
-* Error summary persistence
-* Cooperative cancellation through `CancelJob`
-* Status/read model through `GetJobStatus`
+JobRunner persists:
 
-### CLI worker execution
+- Job identity and type.
+- Lifecycle status.
+- Execution claim mode.
+- Optional payload.
+- Optional active lock key.
+- Progress and heartbeat.
+- Result data.
+- Error metadata.
+- Job logs.
+- Execution attempts.
+- Lifecycle timestamps.
 
-* CLI command for running one queued job
-* Detached worker launch support
-* Handler dispatch by registered job type
-* Deterministic worker boundary error handling
+Current statuses:
 
-### Logging and progress
+```text
+queued
+running
+cancel_requested
+succeeded
+failed
+cancelled
+```
 
-* Job-level logs
-* Structured log levels and streams
-* stdout/stderr-oriented log streams where relevant
-* Incremental log polling via `afterSeq` / `last_log_seq`
-* Bounded log retrieval for UI polling
+Current claim modes:
+
+```text
+token
+trusted
+```
+
+### Execution
+
+JobRunner provides:
+
+- Detached token/push worker launch.
+- Persistent trusted queue supervision.
+- Fresh trusted child-process launch.
+- Atomic token-mode claim.
+- Atomic trusted-mode claim.
+- Shared post-claim handler execution.
+- Deterministic terminal state handling.
+
+### Observability
+
+JobRunner provides:
+
+- Structured job logs.
+- stdout/stderr-oriented log streams.
+- Step key, label, index, and total.
+- Heartbeat timestamps.
+- Incremental log polling through `afterSeq` / `last_log_seq`.
+- Persisted result and error data.
+
+### Cancellation
+
+JobRunner supports cooperative cancellation:
+
+```text
+queued           -> cancelled
+running          -> cancel_requested
+cancel_requested -> cancelled
+```
+
+Handlers observe cancellation through `JobContext::isCancellationRequested()`.
 
 ### Provider integration
 
-* Service registration through `MAP_COMMON`
-* Default configuration through `CFG_COMMON`
-* CLI command registration through `COMMANDS_CLI`
-* No package-specific runtime config discovery
-* No parallel merge system
-
----
-
-## What this package owns
-
-`citomni/jobrunner` owns the generic lifecycle of long-running jobs.
-
-That includes:
-
-* The job record
-* Job status
-* Job payload persistence
-* Job result persistence
-* Job error state
-* Job log persistence
-* Worker token hash
-* Worker claim state
-* Current step state
-* Heartbeat timestamps
-* Cancellation request state
-* Handler lookup by registered job type
-* CLI worker command
-
-This ownership model keeps the runner useful across packages without turning it into the package that knows what every job actually does.
-
----
-
-## What this package does not own
-
-`citomni/jobrunner` is intentionally not a universal queue, shell, or workflow framework.
-
-It does **not** own:
-
-* DevKit Create App workflow logic
-* Commerce import/export logic
-* Deploy workflow logic
-* Composer-specific workflow logic
-* Git-specific workflow logic
-* Application-specific business logic
-* Arbitrary command execution from HTTP
-* Permanent daemon workers
-* Multiple queue backends
-* Scheduled jobs
-* Automatic retry policies
-* Distributed worker orchestration
-* A polished generic administration UI
-
-This package makes long-running workflows observable and safe to execute outside HTTP requests. It should not become a background-processing theme park with surprise rides.
-
----
-
-## Runtime model
-
-A typical flow:
+The package contributes:
 
 ```text
-HTTP Controller / UI
-  -> validates input
-  -> creates job through StartJob
-  -> starts detached CLI worker
-  -> returns job id / status URL
+MAP_COMMON
+  -> jobLogger
+  -> jobRegistry
+  -> jobLauncher
 
-CLI Worker
-  -> claims job
-  -> resolves registered handler
-  -> runs workflow
-  -> writes status, logs, steps, heartbeat, and result
+CFG_COMMON
+  -> table names
+  -> handler map
+  -> PHP binary
+  -> CLI entrypoint
+  -> log chunk limit
+  -> trusted worker idle sleep
 
-HTTP Status UI
-  -> polls GetJobStatus
-  -> displays progress, logs, error, or result
-  -> may request cancellation through CancelJob
+COMMANDS_CLI
+  -> job:run
+  -> job:run-trusted
+  -> job:work
 ```
 
-`citomni/jobrunner` knows how to run a registered job. It does not know what creating an app, importing products, or publishing a deploy means.
+---
 
-Examples:
+## Execution modes
+
+### Token / push
+
+Use token/push when the producer should immediately launch the dedicated worker and that child will inherit the intended execution environment.
+
+Public operation:
+
+```php
+\CitOmni\JobRunner\Operation\StartJob
+```
+
+Example:
+
+```php
+$result = (new \CitOmni\JobRunner\Operation\StartJob($this->app))->execute(
+	'commerce.import_products',
+	[
+		'source_key' => 'supplier-a',
+	],
+	'commerce.import_products:supplier-a',
+	'Import supplier A products'
+);
+```
+
+Runtime:
 
 ```text
-citomni/devkit
-  -> devkit.create_app
-
-citomni/commerce
-  -> commerce.import_products
-  -> commerce.export_feed
+producer
+  -> StartJob
+  -> token-mode queued row
+  -> fresh detached job:run child
+  -> atomic token claim
+  -> shared execution lifecycle
+  -> terminal state
 ```
+
+`StartJob` mints a cryptographically random worker token, persists only its SHA-256 hash, and passes the raw token only to the fixed worker command.
+
+Possible `StartJob` result statuses:
+
+```text
+started
+already_active
+launch_failed
+```
+
+### Trusted / pull
+
+Use trusted/pull when queue production and final execution must be separated and a pre-established trusted supervisor should own dispatch.
+
+Public operation:
+
+```php
+\CitOmni\JobRunner\Operation\EnqueueTrustedJob
+```
+
+Example:
+
+```php
+$result = (new \CitOmni\JobRunner\Operation\EnqueueTrustedJob($this->app))->execute(
+	'deploy.publish_app',
+	[
+		'app_id' => 42,
+		'environment' => 'production',
+	],
+	'deploy.publish_app:42:production',
+	'Publish application'
+);
+```
+
+Runtime:
+
+```text
+producer
+  -> EnqueueTrustedJob
+  -> trusted-mode queued row
+
+job:work
+  -> find oldest trusted queued job
+  -> mint ephemeral handoff capability
+  -> persist/replace capability hash while row remains queued
+  -> launch fresh job:run-trusted child synchronously
+  -> wait for child
+  -> immediately inspect queue again
+
+job:run-trusted
+  -> atomic trusted claim
+  -> shared execution lifecycle
+  -> terminal state
+```
+
+Possible `EnqueueTrustedJob` result statuses:
+
+```text
+queued
+already_active
+```
+
+A trusted job may remain queued while no trusted supervisor is running. There is no implicit fallback to token/push execution.
+
+---
+
+## Persistent trusted supervisor
+
+Start the trusted supervisor with:
+
+```bash
+php bin/citomni job:work
+```
+
+The supervisor:
+
+- Selects the oldest `queued` job with `claim_mode = trusted`.
+- Uses `created_at`, then `id`, for deterministic ordering.
+- Creates an ephemeral handoff token for the selected job.
+- Persists only the SHA-256 hash of that capability.
+- Keeps the row in `queued` state during dispatch preparation.
+- Starts one fresh `job:run-trusted` child.
+- Waits for the child to exit.
+- Checks for the next job immediately.
+- Sleeps only when the trusted queue is empty.
+
+Default idle sleep:
+
+```text
+3 seconds
+```
+
+configured through:
+
+```text
+jobrunner.trusted_worker_idle_sleep_seconds
+```
+
+The intended V1 operating model is one trusted supervisor processing one trusted child at a time.
+
+The supervisor does not execute application handlers in-process.
+
+---
+
+## Fresh process per job
+
+Both execution modes preserve fresh-process isolation.
+
+Token/push:
+
+```text
+StartJob
+-> fresh job:run process
+-> handler
+-> process exits
+```
+
+Trusted/pull:
+
+```text
+persistent job:work supervisor
+-> fresh job:run-trusted process
+-> handler
+-> process exits
+```
+
+The persistent supervisor therefore does not retain application handler state between jobs.
+
+Each actual job receives a fresh:
+
+- PHP runtime.
+- CitOmni `App`.
+- Service graph.
+- `JobRegistry`.
+- Handler instance.
+
+---
+
+## Worker ownership
+
+Both modes require the concrete child process to prove ownership before handler execution.
+
+### Token-mode claim
+
+The child must match:
+
+```text
+job id
+status = queued
+claim_mode = token
+worker_token_hash = SHA-256(raw worker token)
+```
+
+### Trusted-mode claim
+
+The child must match:
+
+```text
+job id
+status = queued
+claim_mode = trusted
+worker_token_hash = SHA-256(raw handoff token)
+```
+
+Only the successful claim changes:
+
+```text
+queued -> running
+```
+
+and records:
+
+```text
+started_at
+heartbeat_at
+attempts + 1
+```
+
+This keeps dispatch attempts separate from actual execution attempts.
+
+For the full ownership and race model, see the [execution ownership architecture](https://github.com/citomni/docs/blob/main/concepts/JobRunner-execution-ownership.md).
+
+---
+
+## Shared execution lifecycle
+
+After a successful claim, both worker types converge on the same execution path.
+
+Conceptually:
+
+```text
+RunQueuedJob
+  -> token claim
+  -> ExecuteRunningJob
+
+RunTrustedJob
+  -> trusted claim
+  -> ExecuteRunningJob
+```
+
+The shared execution lifecycle owns:
+
+- Job loading.
+- Payload decoding.
+- Handler lookup.
+- `JobContext`.
+- Handler execution.
+- Cancellation resolution.
+- Result encoding.
+- Failure persistence.
+- Terminal transitions.
+- Terminal logging.
+
+Token/push and trusted/pull therefore differ in ownership acquisition, not handler semantics.
 
 ---
 
 ## Public operations
 
-The package exposes the main runtime surface as transport-agnostic operations.
-
 ### `StartJob`
 
-Creates a queued job and launches the worker.
+Creates a token-mode queued job and launches its detached worker.
 
-Use it from controllers, commands, or app/package orchestration code after input has been validated by the adapter layer.
+Use when immediate push execution is appropriate.
+
+### `EnqueueTrustedJob`
+
+Creates a trusted-mode queued job without launching a worker.
+
+Use when a separately running `job:work` supervisor should dispatch the job.
 
 ### `GetJobStatus`
 
-Reads one job and a bounded log slice for polling UIs.
+Reads one job, a bounded log slice, result data, and error data.
 
-Typical UI behavior:
-
-```text
-GET job status
-render status, progress, and logs
-store last_log_seq
-next poll requests logs after last_log_seq
-```
+Use `last_log_seq` as the next incremental polling cursor.
 
 ### `CancelJob`
 
-Requests cooperative cancellation.
+Cancels queued jobs immediately or requests cooperative cancellation for running jobs.
 
-Implemented behavior:
+---
+
+## Internal and operational CLI commands
+
+### `job:run`
+
+Internal token/push worker entrypoint:
+
+```text
+php bin/citomni job:run <job-id> --token=<worker-token>
+```
+
+Normal application code should use `StartJob`, not construct this command.
+
+### `job:run-trusted`
+
+Internal trusted child entrypoint:
+
+```text
+php bin/citomni job:run-trusted <job-id> --token=<handoff-token>
+```
+
+Normal application code should not construct this command. `job:work` owns trusted dispatch.
+
+### `job:work`
+
+Operational trusted supervisor:
+
+```text
+php bin/citomni job:work
+```
+
+Run it under the process identity and environment intended to execute trusted jobs.
+
+JobRunner does not switch operating-system users or install/manage host services.
+
+---
+
+## Registering job handlers
+
+Register explicit job types in CitOmni config:
+
+```php
+<?php
+declare(strict_types=1);
+
+return [
+	'jobrunner' => [
+		'handlers' => [
+			'commerce.import_products' => \App\JobRunner\ImportProductsJobHandler::class,
+		],
+	],
+];
+```
+
+Handlers must implement:
+
+```php
+\CitOmni\JobRunner\Contract\JobHandlerInterface
+```
+
+Example:
+
+```php
+<?php
+declare(strict_types=1);
+
+namespace App\JobRunner;
+
+use CitOmni\JobRunner\Contract\JobHandlerInterface;
+use CitOmni\JobRunner\Value\JobContext;
+
+final class ImportProductsJobHandler implements JobHandlerInterface {
+	public function run(JobContext $context): array {
+		$payload = $context->payload();
+
+		$sourceKey = (string)($payload['source_key'] ?? '');
+		if ($sourceKey === '') {
+			throw new \InvalidArgumentException('Payload source_key is required.');
+		}
+
+		$context->info('Import started.', [
+			'source_key' => $sourceKey,
+		]);
+
+		$context->setStep('import', 'Importing products.', 1, 1);
+
+		if ($context->isCancellationRequested()) {
+			return [
+				'cancelled' => true,
+			];
+		}
+
+		// Perform the application workflow here.
+		// Persistence remains in repositories.
+
+		return [
+			'cancelled' => false,
+			'source_key' => $sourceKey,
+		];
+	}
+}
+```
+
+Handlers are currently instantiated without constructor arguments.
+
+Use:
+
+```php
+$context->app();
+```
+
+when the handler needs application services, repositories, or config.
+
+---
+
+## `JobContext`
+
+Handlers use `JobContext` for job-aware execution.
+
+Identity and payload:
+
+```php
+$context->app();
+$context->jobId();
+$context->jobUuid();
+$context->jobType();
+$context->payload();
+```
+
+Logging:
+
+```php
+$context->info('Message.');
+$context->warning('Message.');
+$context->error('Message.');
+$context->debug('Message.');
+
+$context->stdout('Process output.');
+$context->stderr('Process warning.');
+```
+
+Progress:
+
+```php
+$context->setStep(
+	'import',
+	'Importing products.',
+	2,
+	5
+);
+```
+
+Heartbeat:
+
+```php
+$context->heartbeat();
+```
+
+Cancellation:
+
+```php
+if ($context->isCancellationRequested()) {
+	return [
+		'cancelled' => true,
+	];
+}
+```
+
+Cancellation is cooperative. Check between bounded work units.
+
+---
+
+## Active locks
+
+A job may use a logical lock key to prevent duplicate active work.
+
+Active statuses:
+
+```text
+queued
+running
+cancel_requested
+```
+
+Terminal statuses:
+
+```text
+succeeded
+failed
+cancelled
+```
+
+Example:
+
+```text
+job type: deploy.publish_app
+lock key: deploy.publish_app:42:production
+```
+
+The generated `active_lock_key` and its unique index provide the authoritative duplicate guard.
+
+The application-level pre-check exists as a friendly fast path, not as the final race guard.
+
+Both execution modes share the same active-lock behavior.
+
+---
+
+## Status and incremental logs
+
+Use:
+
+```php
+\CitOmni\JobRunner\Operation\GetJobStatus
+```
+
+Example:
+
+```php
+$status = (new \CitOmni\JobRunner\Operation\GetJobStatus($this->app))->execute(
+	$jobId,
+	$afterSeq,
+	200
+);
+```
+
+For incremental polling:
+
+```text
+next afterSeq = last_log_seq
+```
+
+Do not add one manually.
+
+The underlying query already uses:
+
+```text
+seq > afterSeq
+```
+
+The public status read model includes lifecycle state, progress, timestamps, logs, result, and errors without exposing worker ownership material.
+
+---
+
+## Cancellation
+
+Use:
+
+```php
+\CitOmni\JobRunner\Operation\CancelJob
+```
+
+Current behavior:
 
 ```text
 queued           -> cancelled
@@ -227,271 +734,358 @@ cancelled        -> already_terminal
 missing          -> not_found
 ```
 
-A running job is not killed directly. The handler must check `JobContext::isCancellationRequested()` between meaningful steps and return cleanly. The worker then finalizes the job as `cancelled`.
+A running job is not hard-killed by `CancelJob`.
 
----
-
-## Registering job handlers
-
-Applications and consumer packages register explicit job types in CitOmni config.
-
-Example app config overlay:
+The handler cooperates by checking:
 
 ```php
-<?php
-declare(strict_types=1);
-
-return [
-	'jobrunner' => [
-		'handlers' => [
-			'app.example_import' => \App\JobRunner\ExampleImportJobHandler::class,
-		],
-	],
-];
+$context->isCancellationRequested()
 ```
 
-Handlers must implement `JobHandlerInterface`:
-
-```php
-<?php
-declare(strict_types=1);
-
-namespace App\JobRunner;
-
-use CitOmni\JobRunner\Contract\JobHandlerInterface;
-use CitOmni\JobRunner\Value\JobContext;
-
-final class ExampleImportJobHandler implements JobHandlerInterface {
-	public function run(JobContext $context): array {
-		$context->info('Import started.');
-
-		// Do bounded work here. Repositories still own SQL.
-
-		if ($context->isCancellationRequested()) {
-			$context->warning('Import noticed cancellation request.');
-
-			return [
-				'cancelled' => true,
-			];
-		}
-
-		return [
-			'cancelled' => false,
-			'imported'  => 123,
-		];
-	}
-}
-```
-
-Job handlers own the package/application workflow. They should not parse HTTP requests, render responses, or become generic command runners.
-
----
-
-## Starting jobs from HTTP/UI
-
-The HTTP controller should validate input, create a known job type, and return immediately with a job id or status URL.
-
-The UI should then poll status through app-owned HTTP endpoints backed by `GetJobStatus`.
-
-Recommended app-facing endpoint shape:
-
-```text
-POST /admin/jobs/example-import       -> StartJob
-GET  /admin/jobs/{id}                 -> GetJobStatus
-POST /admin/jobs/{id}/cancel          -> CancelJob
-```
-
-`citomni/jobrunner` does not need to own a public generic UI. Applications decide which job types are exposed and who may start or cancel them.
-
----
-
-## Cancellation
-
-Cancellation is cooperative.
-
-A cancel request changes the persisted job state. It does not forcibly terminate the PHP worker process or any child process. Handlers should check cancellation between meaningful units of work:
-
-```php
-if ($context->isCancellationRequested()) {
-	$context->warning('Cancellation requested. Stopping after current step.');
-
-	return [
-		'cancelled' => true,
-	];
-}
-```
-
-This keeps cancellation predictable and avoids leaving partially written domain state behind. Fewer ghosts in the machine. Also fewer ghosts in the database.
-
----
-
-## Logs, progress, and results
-
-Handlers should write useful progress information through `JobContext`.
-
-Recommended practices:
-
-* Log meaningful lifecycle events.
-* Keep log messages safe; do not write secrets.
-* Update steps when the UI benefits from progress display.
-* Return a small domain-shaped result array.
-* Keep large artifacts outside `result_json` and store references instead.
-
-Polling UIs should request logs incrementally and use `last_log_seq` as the cursor for the next poll.
+between meaningful work units.
 
 ---
 
 ## Database model
 
-`citomni/jobrunner` uses two package-owned tables:
+`jobrun_jobs` contains lifecycle and ownership state.
 
-* `jobrun_jobs`
-* `jobrun_logs`
-
-The initial schema is supplied in:
+Important fields include:
 
 ```text
-sql/citomni_jobrunner.sql
+job_uuid
+job_type
+status
+claim_mode
+lock_key
+payload_json
+result_json
+error_class
+error_reason_code
+error_message
+current_step_key
+current_step_label
+step_index
+step_total
+worker_token_hash
+attempts
+created_at
+queued_at
+started_at
+heartbeat_at
+finished_at
+updated_at
+active_lock_key
 ```
 
-The schema includes status, payload, result, error state, worker claim data, heartbeat timestamps, progress fields, logs, and an active-lock mechanism for preventing duplicate active jobs with the same lock key.
+The database enforces claim mode values:
+
+```text
+token
+trusted
+```
+
+and token-mode jobs must carry a worker-token hash.
+
+Trusted jobs are enqueued without one and receive a temporary handoff hash during trusted dispatch preparation.
+
+`jobrun_logs` provides deterministic per-job sequence ordering.
 
 ---
 
-## Active locks
+## Runtime configuration
 
-A job may be created with a lock key to prevent duplicate active work.
+Default package configuration includes:
 
-Typical use:
-
-```text
-job type: devkit.create_app
-lock key: devkit.create_app:example-app
+```php
+'jobrunner' => [
+	'tables' => [
+		'jobs' => 'jobrun_jobs',
+		'logs' => 'jobrun_logs',
+	],
+	'handlers' => [
+	],
+	'php_binary' => 'php',
+	'cli_entrypoint' => 'bin/citomni',
+	'log_chunk_max_bytes' => 16384,
+	'trusted_worker_idle_sleep_seconds' => 3,
+],
 ```
 
-While a job with the same lock key is active, another matching job should not be started. Once the job reaches a terminal status, the lock becomes available again.
-
-Active statuses are:
-
-```text
-queued
-running
-cancel_requested
-```
-
-Terminal statuses are:
-
-```text
-succeeded
-failed
-cancelled
-```
+Applications normally override handler registration and only change launcher/runtime settings when their environment requires it.
 
 ---
 
-## Smoke testing
+## Security guidance
 
-For a reproducible app-local end-to-end smoke test, see:
+### Registered intent, not arbitrary commands
 
-[CitOmni JobRunner - End-to-End Smoke Test](https://github.com/citomni/docs/blob/main/how-to/jobrunner-end-to-end-smoke-test.md)
+Expose bounded registered job types.
 
-The guide verifies the full runtime path from app-local CLI command to `StartJob`, detached CLI worker, registered handler, `JobContext`, persisted logs, heartbeat, steps, result data, active locks, parallel unlocked jobs, `GetJobStatus`, incremental polling, and `CancelJob`.
+Good:
 
-The smoke handler used by the guide is deliberately app-local. It is not part of the public `citomni/jobrunner` runtime API.
+```text
+deploy.publish_app
+commerce.import_products
+reports.build_monthly_summary
+```
+
+Do not make JobRunner a generic transport for arbitrary command strings.
+
+### Keep payloads narrow
+
+Prefer intent:
+
+```php
+[
+	'app_id' => 42,
+	'environment' => 'production',
+]
+```
+
+over arbitrary execution details.
+
+Handlers should resolve authoritative hosts, paths, credentials, and options from application-owned data.
+
+### Do not persist secrets in JobRunner
+
+Do not place raw secrets in:
+
+```text
+payload_json
+result_json
+job logs
+error messages
+titles
+lock keys
+```
+
+Prefer stable references or identifiers and resolve the real credential inside the intended execution context.
+
+### Treat trusted queue writers as privileged action producers
+
+Trusted/pull separates queue production from execution, but a caller that can enqueue a trusted registered job can request the action represented by that job type.
+
+Authentication, authorization, and payload validation remain application responsibilities.
+
+---
+
+## What this package owns
+
+`citomni/jobrunner` owns:
+
+- Generic job lifecycle.
+- Claim mode persistence.
+- Worker ownership gates.
+- Trusted queue dispatch protocol.
+- Worker process launch mechanics for fixed internal worker commands.
+- Handler lookup.
+- `JobContext`.
+- Job logs.
+- Progress and heartbeat persistence.
+- Cancellation request state.
+- Result/error persistence.
+- Terminal transitions.
+
+---
+
+## What this package does not own
+
+JobRunner does not own:
+
+- Application workflow semantics.
+- HTTP authentication or authorization.
+- Application-specific routes or UI.
+- Arbitrary shell execution.
+- Credential storage.
+- Operating-system user switching.
+- Operating-system service/scheduler installation.
+- Scheduled job creation.
+- Automatic retry policy.
+- Multiple queue backends.
+- Distributed worker coordination.
+- Parallel trusted worker pools.
+- Domain-specific persistence.
+
+The host environment decides how `job:work` is started and kept alive.
+
+Consumer packages decide what registered jobs actually do.
 
 ---
 
 ## Operational notes
 
-### Long-running jobs
+### Token/push
 
-Long-running workflows should not run synchronously in HTTP requests. The HTTP layer should create a job, start the CLI worker, and return immediately.
+A successful `StartJob` normally launches the fresh worker immediately.
 
-### Registered job types
+If the environment cannot submit the detached process, JobRunner returns or surfaces launch failure. It does not silently run the job inline.
 
-Jobs should be started by registered job type, not by raw command input. The runner is a workflow launcher, not a browser-accessible terminal wearing a nice shirt.
+### Trusted/pull
 
-### Failure handling
+A trusted job may remain queued until `job:work` is available.
 
-Failed jobs should be visible, inspectable, and boring to diagnose. Boring is a feature.
+This is normal trusted/pull behavior.
 
-The worker boundary records failure details on the job. Unrecoverable runtime failures should follow the normal CitOmni error handling model.
+The supervisor should run in the execution environment intended for trusted jobs.
 
-### Secrets
+### One trusted supervisor
 
-Do not place secrets in payloads, logs, result arrays, exception messages, or UI-visible context.
+The current V1 model is one trusted supervisor and one trusted child at a time.
+
+The atomic child claim still protects against duplicate execution ownership, but deliberately running several supervisors is outside the intended V1 operating model.
+
+### Failed trusted child
+
+A handler failure may cause `job:run-trusted` to exit non-zero after correctly persisting the job as `failed`.
+
+`job:work` continues to later jobs.
 
 ### Cleanup and retention
 
-Cleanup/retention policy is intentionally separate from the core lifecycle. Applications can choose retention rules based on their operational needs.
+Cleanup and retention policy remain outside the core lifecycle.
+
+Applications may define retention rules appropriate to their operational needs.
 
 ---
 
-## Performance notes
+## Troubleshooting
 
-* Services are resolved through explicit service maps rather than scanning.
-* Production should use optimized Composer autoloading.
-* OPcache should be enabled in production.
-* Runtime behavior should remain explicit and deterministic.
-* The runner should prefer simple DB-backed state over external moving parts.
+### Token job stays queued
 
-Composer example:
+Check:
 
-```json
-{
-	"config": {
-		"optimize-autoloader": true,
-		"classmap-authoritative": true,
-		"apcu-autoloader": true
-	}
-}
+```text
+jobrunner.php_binary
+jobrunner.cli_entrypoint
+job:run command registration
+process launch permissions
 ```
 
-Then run:
+Token/push expects the dedicated child to be submitted immediately.
 
-```bash
-composer dump-autoload -o
+### Trusted job stays queued
+
+First verify:
+
+```text
+php bin/citomni job:work
 ```
+
+is running.
+
+Then check:
+
+```text
+database access
+job:run-trusted command registration
+jobrunner.php_binary
+jobrunner.cli_entrypoint
+handler registration
+claim_mode = trusted
+```
+
+Do not manually mark the row `running`. The child must win the guarded claim.
+
+### Job fails immediately
+
+Inspect through `GetJobStatus`:
+
+```text
+error.class
+error.reason_code
+error.message
+logs
+```
+
+Common causes include invalid payload, missing handler, handler contract mismatch, handler exception, or non-encodable result.
+
+### Cancellation is slow
+
+The handler is probably not checking:
+
+```php
+$context->isCancellationRequested();
+```
+
+frequently enough.
+
+### Incremental logs repeat or skip
+
+Use:
+
+```text
+next afterSeq = last_log_seq
+```
+
+exactly as returned.
+
+---
+
+## Smoke testing
+
+For the existing app-local end-to-end smoke-test guide, see:
+
+[CitOmni JobRunner - End-to-End Smoke Test](https://github.com/citomni/docs/blob/main/how-to/jobrunner-end-to-end-smoke-test.md)
+
+For current practical usage of both execution modes, see:
+
+[CitOmni JobRunner - Usage, Execution Modes, Handlers, Status, and Cancellation](https://github.com/citomni/docs/blob/main/how-to/jobrunner-usage.md)
+
+For the detailed trusted/pull ownership model, capability handoff, fencing, race handling, and fresh-process rationale, see:
+
+[JobRunner Execution Ownership Architecture](https://github.com/citomni/docs/blob/main/concepts/JobRunner-execution-ownership.md)
 
 ---
 
 ## Architecture rules
 
-`citomni/jobrunner` follows the normal CitOmni layer boundaries:
+`citomni/jobrunner` follows normal CitOmni boundaries:
 
-* Controllers own HTTP transport concerns.
-* Commands own CLI transport concerns.
-* Operations own orchestration.
-* Repositories own SQL and persistence.
-* Services provide explicit reusable runtime capabilities.
-* Job handlers own the package/application workflow being executed.
+- Controllers own HTTP transport.
+- Commands own CLI transport.
+- Operations own orchestration.
+- Repositories own SQL and persistence.
+- Services provide reusable App-aware runtime tools.
+- Job handlers own application/package workflow.
 
 In particular:
 
-* Do not put SQL in handlers, controllers, commands, operations, or services.
-* Do not expose arbitrary command execution from HTTP.
-* Do not register untrusted user input as a job type.
-* Do not turn JobRunner into a generic queue unless a concrete CitOmni package need proves it.
+- Keep SQL in repositories.
+- Keep transport shaping in controllers and commands.
+- Keep queue/execution orchestration in operations.
+- Keep process launch mechanics in `JobLauncher`.
+- Do not expose arbitrary command execution.
+- Do not put raw credentials in JobRunner persistence.
+- Do not add generic queue machinery without a concrete requirement.
+
+---
+
+## Performance notes
+
+- Service resolution uses explicit CitOmni maps.
+- Trusted idle polling performs a small indexed lookup and sleeps when no work exists.
+- Busy trusted queues are drained without an intentional idle delay between jobs.
+- Fresh PHP process startup is deliberately retained for per-job runtime isolation.
+- No distributed queue infrastructure is required for the current model.
+- Production should use normal PHP/Composer optimization appropriate to the application.
 
 ---
 
 ## Contributing
 
-* PHP 8.2+
-* PSR-4
-* Tabs for indentation
-* K&R brace style
-* PHPDoc and inline comments in English
-* Keep ownership boundaries sharp
-* Keep SQL in repositories, transport in controllers/commands, orchestration in operations
-* Do not introduce generic queue features without a concrete CitOmni package need
-* Do not add arbitrary command execution from HTTP
+- PHP 8.5+
+- PSR-1 / PSR-4
+- Tabs for indentation
+- K&R brace style
+- PHPDoc and inline comments in English
+- Keep ownership boundaries explicit
+- Keep SQL in repositories
+- Keep transport in controllers/commands
+- Keep orchestration in operations
+- Avoid speculative queue, retry, or parallel-worker machinery
 
----
-
-## Coding and documentation conventions
-
-All CitOmni projects follow the shared conventions documented here:
+Shared conventions:
 
 [CitOmni Coding and Documentation Conventions](https://github.com/citomni/docs/blob/main/contribute/CONVENTIONS.md)
 
@@ -500,6 +1094,7 @@ All CitOmni projects follow the shared conventions documented here:
 ## License
 
 **CitOmni JobRunner** is open-source under the **MIT License**.
+
 See [LICENSE](LICENSE).
 
 **Trademark notice:** "CitOmni" and the CitOmni logo are trademarks of **Lars Grove Mortensen**. Usage of the name or logo must follow the policy in [NOTICE](NOTICE). Do not imply endorsement or affiliation without prior written permission.
@@ -509,8 +1104,11 @@ See [LICENSE](LICENSE).
 ## Trademarks
 
 "CitOmni" and the CitOmni logo are trademarks of **Lars Grove Mortensen**.
+
 You may make factual references to "CitOmni", but do not modify the marks, create confusingly similar logos, or imply sponsorship, endorsement, or affiliation without prior written permission.
+
 Do not register or use "citomni" (or confusingly similar terms) in company names, domains, social handles, or top-level vendor/package names.
+
 For details, see [NOTICE](NOTICE) and [TRADEMARKS.md](TRADEMARKS.md).
 
 ---
