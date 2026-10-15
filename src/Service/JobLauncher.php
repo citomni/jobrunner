@@ -72,8 +72,11 @@ use CitOmni\Kernel\Service\BaseService;
  */
 final class JobLauncher extends BaseService {
 
-	private string $phpBinary = 'php';
-	private string $cliEntrypoint = 'bin/citomni';
+	/** PHP binary that starts a job:run or job:run-trusted child; set in init(). */
+	private string $phpBinary;
+
+	/** CLI entrypoint, absolute or relative to the app root; set in init(). */
+	private string $cliEntrypoint;
 
 	/**
 	 * Initialize cheap, immutable launcher configuration.
@@ -92,8 +95,8 @@ final class JobLauncher extends BaseService {
 	 * @throws \CitOmni\JobRunner\Exception\JobRunnerException When launcher cfg is objectively invalid.
 	 */
 	protected function init(): void {
-		$phpBinary     = (string)($this->app->cfg->jobrunner->php_binary ?? 'php');
-		$cliEntrypoint = (string)($this->app->cfg->jobrunner->cli_entrypoint ?? 'bin/citomni');
+		$phpBinary     = (string)$this->app->cfg->jobrunner->php_binary;
+		$cliEntrypoint = (string)$this->app->cfg->jobrunner->cli_entrypoint;
 
 		if ($phpBinary === '') {
 			throw new JobRunnerException(

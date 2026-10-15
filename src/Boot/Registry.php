@@ -68,15 +68,15 @@ final class Registry {
 	
 		'jobrunner' => [
 			'tables' => [
-				'jobs' => 'jobrun_jobs',
-				'logs' => 'jobrun_logs',
+				'jobs' => 'jobrun_jobs', // Table that holds one row per job.
+				'logs' => 'jobrun_logs', // Table that holds the log chunks of the jobs.
 			],
-			'handlers' => [
-			],			
-			'php_binary'     => 'php',
-			'cli_entrypoint' => 'bin/citomni',
-			'log_chunk_max_bytes' => 16384,
-			'trusted_worker_idle_sleep_seconds' => 3,
+			'handlers' => [ // Job type => JobHandlerInterface class; the app registers its job types here.
+			],
+			'php_binary'                        => 'php',         // PHP binary that starts a job child process; must not be empty.
+			'cli_entrypoint'                    => 'bin/citomni', // CLI entrypoint of the child, absolute or relative to the app root; must not be empty.
+			'log_chunk_max_bytes'               => 16384,         // Maximum bytes of one log row; a longer message is split over several rows, >= 4.
+			'trusted_worker_idle_sleep_seconds' => 3,             // Seconds job:work sleeps when no trusted job is queued, >= 1.
 		],
 	
 	];
