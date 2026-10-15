@@ -44,7 +44,7 @@ final class Registry {
 	 *
 	 * Keep this map limited to transport-neutral singleton services.
 	 */
-	public const MAP_COMMON = [
+	public const array MAP_COMMON = [
 
 		'jobLogger' => \CitOmni\JobRunner\Service\JobLogger::class,
 		'jobRegistry' => \CitOmni\JobRunner\Service\JobRegistry::class,
@@ -64,7 +64,7 @@ final class Registry {
 	 * - Keep transport-neutral jobrunner settings here.
 	 * - Do not add config keys before the consuming code exists.
 	 */
-	public const CFG_COMMON = [
+	public const array CFG_COMMON = [
 	
 		'jobrunner' => [
 			'tables' => [
@@ -88,7 +88,7 @@ final class Registry {
 	 * This package currently does not expose HTTP-only singleton services by default.
 	 * Shared services belong in MAP_COMMON.
 	 */
-	public const MAP_HTTP = [
+	public const array MAP_HTTP = [
 	];
 
 
@@ -98,7 +98,7 @@ final class Registry {
 	 * Keep minimal unless the package grows HTTP-only defaults.
 	 * Shared jobrunner defaults belong in CFG_COMMON.
 	 */
-	public const CFG_HTTP = [
+	public const array CFG_HTTP = [
 	];
 
 
@@ -108,7 +108,7 @@ final class Registry {
 	 * This package does not expose package-owned HTTP routes by default.
 	 * Consumer packages and apps may build their own status UI and endpoints.
 	 */
-	public const ROUTES_HTTP = [
+	public const array ROUTES_HTTP = [
 	];
 
 
@@ -118,7 +118,7 @@ final class Registry {
 	 * This package currently does not expose CLI-only singleton services by default.
 	 * Shared services belong in MAP_COMMON.
 	 */
-	public const MAP_CLI = [
+	public const array MAP_CLI = [
 	];
 
 
@@ -128,7 +128,7 @@ final class Registry {
 	 * Keep minimal unless the package grows CLI-only defaults.
 	 * Shared jobrunner defaults belong in CFG_COMMON.
 	 */
-	public const CFG_CLI = [
+	public const array CFG_CLI = [
 	];
 
 
@@ -139,7 +139,7 @@ final class Registry {
 	 * command runner. Commands here should stay thin transport adapters and
 	 * delegate job lifecycle work to operations and repositories.
 	 */
-	public const COMMANDS_CLI = [
+	public const array COMMANDS_CLI = [
 		'job:run' => [
 			'command'     => \CitOmni\JobRunner\Command\RunJobCommand::class,
 			'description' => 'Run one queued CitOmni JobRunner job.',
