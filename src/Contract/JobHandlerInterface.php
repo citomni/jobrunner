@@ -34,7 +34,7 @@ use CitOmni\JobRunner\Value\JobContext;
  * Result contract:
  * - run() returns domain-shaped result data as an associative array.
  * - The array MUST be JSON-encodable; the runner persists it as result_json
- *   and marks the job succeeded.
+ *   and marks the job succeeded, unless the job ends cancelled.
  * - Return an empty array when there is no meaningful result payload.
  *
  * Failure contract:
@@ -47,6 +47,11 @@ use CitOmni\JobRunner\Value\JobContext;
  *   the context's cancellation check between steps before starting more work.
  * - Handlers should use the JobContext cancellation API rather than writing
  *   status directly or inventing their own terminal-state handling.
+ * - A cancellation request that lands before the runner records success wins:
+ *   The job ends cancelled and the returned array is discarded, whether or not
+ *   the handler noticed the request. Return an empty array after stopping.
+ * - Stop by returning, not by throwing. A throw marks the job failed, also
+ *   after a cancellation request.
  *
  * Notes:
  * - Stateless by preference: one handler instance may be reused across jobs in

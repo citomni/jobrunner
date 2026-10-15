@@ -558,16 +558,13 @@ final class ImportProductsJobHandler implements JobHandlerInterface {
 		$context->setStep('import', 'Importing products.', 1, 1);
 
 		if ($context->isCancellationRequested()) {
-			return [
-				'cancelled' => true,
-			];
+			return [];
 		}
 
 		// Perform the application workflow here.
 		// Persistence remains in repositories.
 
 		return [
-			'cancelled' => false,
 			'source_key' => $sourceKey,
 		];
 	}
@@ -633,13 +630,13 @@ Cancellation:
 
 ```php
 if ($context->isCancellationRequested()) {
-	return [
-		'cancelled' => true,
-	];
+	return [];
 }
 ```
 
 Cancellation is cooperative. Check between bounded work units.
+
+When cancellation has been requested before the runner records success, the job ends `cancelled` and the returned array is discarded, whether or not the handler noticed the request. A cancelled job has no `result_json`, so return an empty array after stopping. Stop by returning, not by throwing: A throw marks the job `failed`, also after a cancellation request.
 
 ---
 
