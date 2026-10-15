@@ -53,10 +53,10 @@ final class WorkTrustedQueue extends BaseOperation {
 	/**
 	 * Run the trusted queue supervisor until the process is externally stopped.
 	 *
-	 * @return void
+	 * @return never
 	 * @throws \UnexpectedValueException When the configured idle sleep is invalid.
 	 */
-	public function execute(): void {
+	public function execute(): never {
 		$idleSleepSeconds = (int)$this->app->cfg->jobrunner->trusted_worker_idle_sleep_seconds;
 		if ($idleSleepSeconds < 1) {
 			throw new \UnexpectedValueException('jobrunner.trusted_worker_idle_sleep_seconds must be >= 1.');

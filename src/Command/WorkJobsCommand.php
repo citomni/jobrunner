@@ -28,20 +28,17 @@ use CitOmni\Kernel\Command\BaseCommand;
  * Behavior:
  * - Emits one startup status line for an interactive/manual worker launch.
  * - Runs the trusted queue supervisor until the process is externally stopped.
- * - Returns success only if the supervisor ever returns normally.
  */
 final class WorkJobsCommand extends BaseCommand {
 
 	/**
 	 * Start the trusted queue supervisor.
 	 *
-	 * @return int Process exit code.
+	 * @return never
 	 */
-	protected function execute(): int {
+	protected function execute(): never {
 		$this->info('Trusted JobRunner worker started.');
 
 		(new WorkTrustedQueue($this->app))->execute();
-
-		return self::SUCCESS;
 	}
 }
