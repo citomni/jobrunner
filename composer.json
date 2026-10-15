@@ -23,7 +23,7 @@
 	"require": {
 		"php": "^8.5",
 		"ext-json": "*",
-		"citomni/kernel": "^1.0",
+		"citomni/kernel": "^1.0.2.7",
 		"citomni/cli": "^1.0",
 		"citomni/infrastructure": "^1.0"
 	},
