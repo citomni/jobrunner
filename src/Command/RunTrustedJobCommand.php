@@ -42,7 +42,7 @@ final class RunTrustedJobCommand extends BaseCommand {
 	/**
 	 * Declare the command interface.
 	 *
-	 * @return array<string,array<string,mixed>> Command signature.
+	 * @return array{arguments?: array<string,array<string,mixed>>, options?: array<string,array<string,mixed>>} Command signature.
 	 */
 	protected function signature(): array {
 		return [
